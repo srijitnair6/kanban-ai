@@ -131,6 +131,12 @@ export type KanbanCardContentProps<TTag extends KanbanTag = KanbanTag> = {
   pullRequests?: KanbanPullRequest[];
   relationships?: KanbanRelationship[];
   isSubIssue?: boolean;
+  /** Small label shown next to the ID, e.g. 'Epic' or 'Story'. */
+  kindLabel?: string;
+  /** For stories: the epic this story belongs to (shown under the title). */
+  epicLabel?: string;
+  /** For epics: how many of its stories are done. */
+  progress?: { done: number; total: number };
   isLoading?: boolean;
   className?: string;
   onPriorityClick?: (e: MouseEvent) => void;
@@ -150,6 +156,9 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
   pullRequests = [],
   relationships = [],
   isSubIssue,
+  kindLabel,
+  epicLabel,
+  progress,
   isLoading = false,
   className,
   onPriorityClick,
@@ -212,6 +221,11 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
           <span className="font-ibm-plex-mono text-sm text-low truncate">
             {displayId}
           </span>
+          {kindLabel && (
+            <span className="rounded-sm bg-secondary px-half text-xs uppercase tracking-wide text-low shrink-0">
+              {kindLabel}
+            </span>
+          )}
           {isLoading && <RunningDots />}
         </div>
         {onMoreActionsClick && (
@@ -239,6 +253,32 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
 
       {/* Row 2: Title */}
       <span className="text-base text-normal truncate">{title}</span>
+
+      {/* Row 2b: Epic of a story, or story progress of an epic */}
+      {epicLabel && (
+        <span className="text-sm text-low truncate" title={epicLabel}>
+          {epicLabel}
+        </span>
+      )}
+      {progress && (
+        <div className="flex items-center gap-half min-w-0">
+          <div className="h-1 flex-1 overflow-hidden rounded-full bg-secondary">
+            <div
+              className="h-full rounded-full bg-brand"
+              style={{
+                width: `${
+                  progress.total === 0
+                    ? 0
+                    : Math.round((progress.done / progress.total) * 100)
+                }%`,
+              }}
+            />
+          </div>
+          <span className="text-sm text-low shrink-0">
+            {progress.done}/{progress.total}
+          </span>
+        </div>
+      )}
 
       {/* Row 3: Description (optional, truncated) */}
       {previewDescription && (

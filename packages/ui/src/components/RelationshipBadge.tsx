@@ -34,9 +34,9 @@ const RELATIONSHIP_ICONS = {
 function getRelationshipLabel(displayType: RelationshipDisplayType): string {
   switch (displayType) {
     case 'blocks':
-      return 'blocks';
+      return 'required by';
     case 'blocked_by':
-      return 'blocked by';
+      return 'depends on';
     case 'related':
       return 'related';
     case 'duplicate_of':

@@ -153,6 +153,8 @@ export interface KanbanIssuePanelProps {
   renderWorkspacesSection?: (issueId: string) => ReactNode;
   renderRelationshipsSection?: (issueId: string) => ReactNode;
   renderSubIssuesSection?: (issueId: string) => ReactNode;
+  /** Epic/story info under the property row. Return null to render nothing. */
+  renderKindSection?: (issueId: string | null) => ReactNode;
   renderCommentsSection?: (issueId: string) => ReactNode;
 }
 
@@ -193,6 +195,7 @@ export function KanbanIssuePanel({
   renderWorkspacesSection,
   renderRelationshipsSection,
   renderSubIssuesSection,
+  renderKindSection,
   renderCommentsSection,
 }: KanbanIssuePanelProps) {
   const { t } = useTranslation('common');
@@ -317,6 +320,14 @@ export function KanbanIssuePanel({
             disabled={isSubmitting}
           />
         </div>
+
+        {/* Epic / story info (nothing for plain issues) */}
+        {(() => {
+          const kindSection = renderKindSection?.(issueId ?? null);
+          return kindSection ? (
+            <div className="px-base py-base border-b">{kindSection}</div>
+          ) : null;
+        })()}
 
         {/* Tags Row */}
         <div className="px-base py-base border-b">

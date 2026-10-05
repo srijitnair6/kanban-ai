@@ -17,7 +17,8 @@ import { useProjectWorkspaceCreateDraft } from '@/shared/hooks/useProjectWorkspa
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
 import { SearchableTagDropdownContainer } from '@/shared/components/SearchableTagDropdownContainer';
 import { IssueCommentsSectionContainer } from './IssueCommentsSectionContainer';
-import { IssueSubIssuesSectionContainer } from './IssueSubIssuesSectionContainer';
+import { IssueKindSectionContainer } from './IssueKindSectionContainer';
+import { IssueStoriesOrSubIssuesSection } from './IssueEpicStoriesSectionContainer';
 import { IssueRelationshipsSectionContainer } from './IssueRelationshipsSectionContainer';
 import { IssueWorkspacesSectionContainer } from './IssueWorkspacesSectionContainer';
 import {
@@ -42,6 +43,12 @@ import {
   selectIsCreateDraftDirty,
 } from './kanban-issue-panel-state';
 import { useUiPreferencesStore } from '@/shared/stores/useUiPreferencesStore';
+import {
+  EPIC_DESCRIPTION_TEMPLATE,
+  STORY_DESCRIPTION_TEMPLATE,
+  buildIssueMetadata,
+  getIssueKind,
+} from '@/shared/lib/issueKind';
 import { useAzureAttachments } from '@/shared/hooks/useAzureAttachments';
 import {
   commitIssueAttachments,
@@ -128,6 +135,9 @@ export function KanbanIssuePanelContainer({
     createComposerInitial?.assigneeIds ?? null;
   const kanbanCreateDefaultParentIssueId =
     createComposerInitial?.parentIssueId ?? null;
+  const kanbanCreateKind = createComposerInitial?.issueKind ?? null;
+  const kanbanCreateEpicId =
+    issueComposer?.draft.epicId ?? createComposerInitial?.epicId ?? null;
   const createDraftWorkspaceByDefault = useUiPreferencesStore(
     (state) => state.createDraftWorkspaceByDefault
   );
@@ -260,7 +270,12 @@ export function KanbanIssuePanelContainer({
   const createModeDefaults = useMemo<IssueFormData>(
     () => ({
       title: '',
-      description: null,
+      description:
+        kanbanCreateKind === 'story'
+          ? STORY_DESCRIPTION_TEMPLATE
+          : kanbanCreateKind === 'epic'
+            ? EPIC_DESCRIPTION_TEMPLATE
+            : null,
       statusId: defaultStatusId,
       priority: kanbanCreateDefaultPriority ?? null,
       assigneeIds: [...(kanbanCreateDefaultAssigneeIds ?? [])],
@@ -268,6 +283,7 @@ export function KanbanIssuePanelContainer({
       createDraftWorkspace: createDraftWorkspaceByDefault,
     }),
     [
+      kanbanCreateKind,
       defaultStatusId,
       kanbanCreateDefaultPriority,
       kanbanCreateDefaultAssigneeIds,
@@ -311,8 +327,10 @@ export function KanbanIssuePanelContainer({
     if (mode === 'edit' && selectedIssue) {
       return selectedIssue.simple_id;
     }
+    if (kanbanCreateKind === 'epic') return t('kanban.newEpic', 'New epic');
+    if (kanbanCreateKind === 'story') return t('kanban.newStory', 'New story');
     return t('kanban.newIssue');
-  }, [mode, selectedIssue, t]);
+  }, [mode, selectedIssue, kanbanCreateKind, t]);
 
   // Compute display values based on mode
   // - Create mode: createFormData is the single source of truth.
@@ -818,6 +836,23 @@ export function KanbanIssuePanelContainer({
   const handleSubmit = useCallback(async () => {
     if (!displayData.title.trim() || hasPendingAttachments) return;
 
+    if (
+      mode === 'create' &&
+      kanbanCreateKind === 'story' &&
+      !kanbanCreateEpicId
+    ) {
+      await ConfirmDialog.show({
+        title: t('common:error'),
+        message: t(
+          'kanban.storyNeedsEpic',
+          'Choose the epic this story belongs to before creating it.'
+        ),
+        confirmText: t('common:ok'),
+        showCancelButton: false,
+      });
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       if (mode === 'create') {
@@ -842,7 +877,10 @@ export function KanbanIssuePanelContainer({
           completed_at: null,
           parent_issue_id: kanbanCreateDefaultParentIssueId,
           parent_issue_sort_order: null,
-          extension_metadata: null,
+          extension_metadata: buildIssueMetadata(
+            kanbanCreateKind,
+            kanbanCreateEpicId
+          ),
         });
 
         // Wait for the issue to be confirmed by the backend and get the synced entity
@@ -954,6 +992,8 @@ export function KanbanIssuePanelContainer({
     insertIssueTag,
     openIssue,
     kanbanCreateDefaultParentIssueId,
+    kanbanCreateKind,
+    kanbanCreateEpicId,
     openWorkspaceCreateFromState,
     workspaces,
     localWorkspaceIds,
@@ -1103,8 +1143,29 @@ export function KanbanIssuePanelContainer({
         <IssueRelationshipsSectionContainer issueId={issueId} />
       )}
       renderSubIssuesSection={(issueId) => (
-        <IssueSubIssuesSectionContainer issueId={issueId} />
+        <IssueStoriesOrSubIssuesSection issueId={issueId} />
       )}
+      renderKindSection={(issueId) => {
+        const openIssueRecord = issueId
+          ? issues.find((i) => i.id === issueId)
+          : undefined;
+        const kind = issueId
+          ? openIssueRecord
+            ? getIssueKind(openIssueRecord)
+            : null
+          : kanbanCreateKind;
+        if (!kind) return null;
+        return (
+          <IssueKindSectionContainer
+            issueId={issueId}
+            createKind={kanbanCreateKind}
+            createEpicId={kanbanCreateEpicId}
+            onCreateEpicChange={(epicId) =>
+              patchKanbanIssueComposer(issueComposerKey, { epicId })
+            }
+          />
+        );
+      }}
       renderCommentsSection={(issueId) => (
         <IssueCommentsSectionContainer issueId={issueId} />
       )}
