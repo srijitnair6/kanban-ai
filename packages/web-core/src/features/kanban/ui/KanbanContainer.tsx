@@ -32,7 +32,7 @@ import {
   bulkUpdateIssues,
   type BulkUpdateIssueItem,
 } from '@/shared/lib/remoteApi';
-import { PlusIcon, DotsThreeIcon } from '@phosphor-icons/react';
+import { DotsThreeIcon } from '@phosphor-icons/react';
 import { Actions } from '@/shared/actions';
 import {
   buildKanbanIssueComposerKey,
@@ -59,6 +59,14 @@ import {
 import { resolveRelationshipsForIssue } from '@/shared/lib/resolveRelationships';
 import { KanbanFilterBar } from '@vibe/ui/components/KanbanFilterBar';
 import { ViewNavTabs } from '@vibe/ui/components/ViewNavTabs';
+import { EntityViewToggle } from '@vibe/ui/components/EntityViewToggle';
+import {
+  getEpicId,
+  getEpicProgress,
+  getIssueKind,
+  groupStoriesByEpic,
+} from '@/shared/lib/issueKind';
+import { ProjectRepoChipContainer } from './ProjectRepoChipContainer';
 import { IssueListView } from '@vibe/ui/components/IssueListView';
 import { CommandBarDialog } from '@/shared/dialogs/command-bar/CommandBarDialog';
 import { KanbanFiltersDialog } from '@/shared/dialogs/kanban/KanbanFiltersDialog';
@@ -285,6 +293,11 @@ export function KanbanContainer() {
     return ids;
   }, [statuses]);
 
+  const kanbanEntityView = useUiPreferencesStore((s) => s.kanbanEntityView);
+  const setKanbanEntityView = useUiPreferencesStore(
+    (s) => s.setKanbanEntityView
+  );
+
   const { filteredIssues } = useKanbanFilters({
     issues,
     issueAssignees,
@@ -295,6 +308,7 @@ export function KanbanContainer() {
     filters: kanbanFilters,
     showSubIssues,
     hideBlocked,
+    entityView: kanbanEntityView,
     currentUserId: userId,
   });
 
@@ -529,6 +543,9 @@ export function KanbanContainer() {
     }
     setItems(grouped);
   }, [filteredIssues, statuses, kanbanFilters]);
+
+  // Stories grouped by epic, for the progress shown on epic cards
+  const storiesByEpicId = useMemo(() => groupStoriesByEpic(issues), [issues]);
 
   // Create a lookup map for issue data
   const issueMap = useMemo(() => {
@@ -812,6 +829,8 @@ export function KanbanContainer() {
   const handleAddTask = useCallback(
     (statusId?: string) => {
       const createPayload = {
+        issueKind:
+          kanbanEntityView === 'epics' ? ('epic' as const) : ('story' as const),
         statusId: statusId ?? defaultCreateStatusId,
         ...(createAssigneeIds.length > 0
           ? { assigneeIds: createAssigneeIds }
@@ -819,7 +838,7 @@ export function KanbanContainer() {
       };
       startCreate(createPayload);
     },
-    [createAssigneeIds, defaultCreateStatusId, startCreate]
+    [createAssigneeIds, defaultCreateStatusId, kanbanEntityView, startCreate]
   );
 
   // Inline editing callbacks for kanban cards
@@ -905,6 +924,10 @@ export function KanbanContainer() {
           <h2 className={cn('text-2xl font-medium', isMobile && 'text-lg')}>
             {projectName}
           </h2>
+          <ProjectRepoChipContainer
+            projectId={projectId}
+            onClick={() => executeAction(Actions.ProjectSettings)}
+          />
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -935,6 +958,10 @@ export function KanbanContainer() {
             isMobile ? 'flex-col' : 'flex-wrap'
           )}
         >
+          <EntityViewToggle
+            activeView={kanbanEntityView}
+            onViewChange={setKanbanEntityView}
+          />
           <ViewNavTabs
             activeView={kanbanViewMode}
             onViewChange={setKanbanViewMode}
@@ -967,6 +994,11 @@ export function KanbanContainer() {
             onHideBlockedChange={setHideBlocked}
             onClearFilters={clearKanbanFilters}
             onCreateIssue={handleAddTask}
+            createLabel={
+              kanbanEntityView === 'epics'
+                ? t('kanban.newEpic', 'New epic')
+                : t('kanban.newStory', 'New story')
+            }
             shouldAnimateCreateButton={shouldAnimateCreateButton}
             renderFiltersDialog={(props) => <KanbanFiltersDialog {...props} />}
             isMobile={isMobile}
@@ -996,14 +1028,6 @@ export function KanbanContainer() {
                           />
                           <p className="m-0 text-sm">{status.name}</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleAddTask(status.id)}
-                          className="p-half rounded-sm text-low hover:text-normal hover:bg-secondary transition-colors"
-                          aria-label="Add task"
-                        >
-                          <PlusIcon className="size-icon-xs" weight="bold" />
-                        </button>
                       </div>
                     </KanbanHeader>
                     <KanbanCards id={status.id}>
@@ -1026,6 +1050,16 @@ export function KanbanContainer() {
                           // do not render it again at the issue level.
                           return !workspaceIdsShownOnCard.has(pr.workspace_id);
                         });
+
+                        const issueKind = getIssueKind(issue);
+                        const epicOfStory =
+                          issueKind === 'story'
+                            ? issuesById.get(getEpicId(issue) ?? '')
+                            : undefined;
+                        const storiesOfEpic =
+                          issueKind === 'epic'
+                            ? (storiesByEpicId.get(issue.id) ?? [])
+                            : [];
 
                         return (
                           <KanbanCard
@@ -1054,6 +1088,26 @@ export function KanbanContainer() {
                                 issuesById
                               )}
                               isSubIssue={!!issue.parent_issue_id}
+                              kindLabel={
+                                issueKind === 'epic'
+                                  ? t('kanban.epicLabel', 'Epic')
+                                  : issueKind === 'story'
+                                    ? t('kanban.storyLabel', 'Story')
+                                    : undefined
+                              }
+                              epicLabel={
+                                epicOfStory
+                                  ? `${epicOfStory.simple_id} · ${epicOfStory.title}`
+                                  : undefined
+                              }
+                              progress={
+                                issueKind === 'epic'
+                                  ? getEpicProgress(
+                                      storiesOfEpic,
+                                      doneStatusIds
+                                    )
+                                  : undefined
+                              }
                               isMobile={isMobile}
                               onPriorityClick={(e) => {
                                 e.stopPropagation();

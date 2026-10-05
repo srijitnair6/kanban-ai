@@ -1,3 +1,8 @@
+import {
+  loadEntityView,
+  saveEntityView,
+  type EntityView,
+} from '@/shared/lib/issueKind';
 import { useCallback, useMemo, useRef } from 'react';
 import { create } from 'zustand';
 import type { RepoAction } from '@vibe/ui/components/RepoCard';
@@ -343,6 +348,8 @@ type State = {
   // Kanban view mode state
   kanbanViewMode: KanbanViewMode;
   listViewStatusFilter: string | null;
+  // Epic view vs story view of the board (persisted)
+  kanbanEntityView: EntityView;
 
   // Mobile tab state
   mobileActiveTab: MobileTab;
@@ -430,6 +437,7 @@ type State = {
 
   // Kanban view mode actions
   setKanbanViewMode: (mode: KanbanViewMode) => void;
+  setKanbanEntityView: (view: EntityView) => void;
   setListViewStatusFilter: (statusId: string | null) => void;
 
   // Mobile tab actions
@@ -475,6 +483,7 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
   // Kanban view mode state
   kanbanViewMode: 'kanban' as KanbanViewMode,
   listViewStatusFilter: null,
+  kanbanEntityView: loadEntityView(),
 
   // Mobile tab state
   mobileActiveTab: 'chat' as MobileTab,
@@ -815,6 +824,11 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
 
   // Kanban view mode actions
   setKanbanViewMode: (mode) => set({ kanbanViewMode: mode }),
+
+  setKanbanEntityView: (view) => {
+    saveEntityView(view);
+    set({ kanbanEntityView: view });
+  },
 
   setListViewStatusFilter: (statusId) =>
     set({ listViewStatusFilter: statusId }),

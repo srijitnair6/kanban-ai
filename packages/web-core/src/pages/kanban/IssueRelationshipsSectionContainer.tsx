@@ -99,13 +99,13 @@ export function IssueRelationshipsSectionContainer({
           icon={ArrowBendUpRightIcon}
           onSelect={() => handleSelectType('blocking', 'forward')}
         >
-          Blocks...
+          Required by...
         </DropdownMenuItem>
         <DropdownMenuItem
           icon={ProhibitIcon}
           onSelect={() => handleSelectType('blocking', 'reverse')}
         >
-          Blocked by...
+          Depends on...
         </DropdownMenuItem>
         <DropdownMenuItem
           icon={ArrowsLeftRightIcon}

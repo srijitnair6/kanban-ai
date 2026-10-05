@@ -1,6 +1,7 @@
 use api_types::{
-    DeleteResponse, Issue, IssuePriority, IssueSortField, ListIssuesResponse, MutationResponse,
-    PullRequestStatus, SearchIssuesRequest, SortDirection,
+    DeleteResponse, Issue, IssueKind, IssuePriority, IssueSortField, ListIssuesResponse,
+    MutationResponse, PullRequestStatus, SearchIssuesRequest, SortDirection, epic_id_from_metadata,
+    epic_rollup_target, is_planning_status_name,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -517,8 +518,135 @@ impl IssueRepository {
         Ok(DeleteResponse { txid })
     }
 
+    /// Carries an epic's not-yet-started stories along when the epic moves to a planning
+    /// status ("Backlog" or "To Do"). Stories that are already in progress, in testing, in
+    /// review or done are never pulled back. Returns the number of stories moved.
+    ///
+    /// Call this only when the epic's status actually changed, so reordering a column does
+    /// not re-sync stories the user deliberately left in another planning status.
+    pub async fn cascade_epic_status(
+        conn: &mut PgConnection,
+        epic: &Issue,
+    ) -> Result<u64, IssueError> {
+        if IssueKind::from_metadata(&epic.extension_metadata) != Some(IssueKind::Epic) {
+            return Ok(0);
+        }
+
+        let Some(status) = ProjectStatusRepository::find_by_id(&mut *conn, epic.status_id).await?
+        else {
+            return Ok(0);
+        };
+        if !is_planning_status_name(&status.name) {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE issues AS s
+            SET status_id = $1, updated_at = NOW()
+            FROM project_statuses AS cur
+            WHERE s.project_id = $2
+              AND cur.id = s.status_id
+              AND s.extension_metadata->>'kind' = 'story'
+              AND s.extension_metadata->>'epic_id' = $3
+              AND s.status_id <> $1
+              AND LOWER(cur.name) IN ('backlog', 'to do')
+            "#,
+        )
+        .bind(epic.status_id)
+        .bind(epic.project_id)
+        .bind(epic.id.to_string())
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Re-evaluates the epic of `story` after the story changed, was created or moved.
+    /// See [`Self::rollup_epic_by_id`]. Does nothing when `story` is not a story.
+    pub async fn rollup_epic_status(
+        conn: &mut PgConnection,
+        story: &Issue,
+    ) -> Result<bool, IssueError> {
+        match epic_id_from_metadata(&story.extension_metadata) {
+            Some(epic_id) => Self::rollup_epic_by_id(conn, epic_id).await,
+            None => Ok(false),
+        }
+    }
+
+    /// Moves an epic to follow its stories: Done when every active story is Done, and
+    /// In Progress when a story has started (or a Done epic gets an unfinished story).
+    /// Never moves an epic back to a planning status. Returns whether the epic moved.
+    pub async fn rollup_epic_by_id(
+        conn: &mut PgConnection,
+        epic_id: Uuid,
+    ) -> Result<bool, IssueError> {
+        let Some(epic) = Self::find_by_id(&mut *conn, epic_id).await? else {
+            return Ok(false);
+        };
+        if IssueKind::from_metadata(&epic.extension_metadata) != Some(IssueKind::Epic) {
+            return Ok(false);
+        }
+        let Some(epic_status) =
+            ProjectStatusRepository::find_by_id(&mut *conn, epic.status_id).await?
+        else {
+            return Ok(false);
+        };
+
+        let story_statuses: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT ps.name
+            FROM issues AS s
+            JOIN project_statuses AS ps ON ps.id = s.status_id
+            WHERE s.project_id = $1
+              AND s.extension_metadata->>'kind' = 'story'
+              AND s.extension_metadata->>'epic_id' = $2
+            "#,
+        )
+        .bind(epic.project_id)
+        .bind(epic.id.to_string())
+        .fetch_all(&mut *conn)
+        .await?;
+        let story_status_names: Vec<&str> =
+            story_statuses.iter().map(|(name,)| name.as_str()).collect();
+
+        let Some(target) = epic_rollup_target(&story_status_names, &epic_status.name) else {
+            return Ok(false);
+        };
+        let Some(target_status) = ProjectStatusRepository::find_by_name(
+            &mut *conn,
+            epic.project_id,
+            target.status_name(),
+        )
+        .await?
+        else {
+            return Ok(false);
+        };
+        if target_status.id == epic.status_id {
+            return Ok(false);
+        }
+
+        Self::update(
+            &mut *conn,
+            epic.id,
+            Some(target_status.id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        Ok(true)
+    }
+
     /// Syncs issue status based on a workflow signal.
-    /// - `ReviewStarted` → move issue to "In review"
+    /// - `ReviewStarted` → move issue to "Review"
     /// - `WorkMerged` → if all linked PRs are merged, move issue to "Done"
     async fn sync_status_from_workflow_signal(
         conn: &mut PgConnection,
@@ -530,7 +658,7 @@ impl IssueRepository {
         };
 
         let target_status_name = match signal {
-            IssueWorkflowSignal::ReviewStarted => "In review",
+            IssueWorkflowSignal::ReviewStarted => "Review",
             IssueWorkflowSignal::WorkMerged => {
                 let prs = PullRequestRepository::list_by_issue(&mut *conn, issue_id).await?;
                 let all_merged = prs.iter().all(|pr| pr.status == PullRequestStatus::Merged);
@@ -553,7 +681,7 @@ impl IssueRepository {
             return Ok(());
         }
 
-        Self::update(
+        let updated = Self::update(
             &mut *conn,
             issue_id,
             Some(target_status.id),
@@ -569,12 +697,13 @@ impl IssueRepository {
             None,
         )
         .await?;
+        Self::rollup_epic_status(&mut *conn, &updated).await?;
 
         Ok(())
     }
 
     /// Syncs issue status based on the current pull-request status.
-    /// - Open PR => move issue to "In review"
+    /// - Open PR => move issue to "Review"
     /// - Merged/closed PR => if all linked PRs are merged, move issue to "Done"
     pub async fn sync_status_from_pull_request(
         conn: &mut PgConnection,
@@ -598,7 +727,7 @@ impl IssueRepository {
             .await
     }
 
-    /// Moves an issue to the given target status if its current status is "Backlog" or "To do".
+    /// Moves an issue to the given target status if its current status is "Backlog" or "To Do".
     async fn move_to_status_if_pending(
         conn: &mut PgConnection,
         issue_id: Uuid,
@@ -635,8 +764,9 @@ impl IssueRepository {
     }
 
     /// Syncs issue state when a workspace is created:
-    /// - If this is the first workspace and the issue is in "Backlog" or "To do", moves to "In progress"
-    /// - If sub-issue, also moves parent issue to "In progress" if pending
+    /// - If this is the first workspace and the issue is in "Backlog" or "To Do", moves to "In Progress"
+    /// - If sub-issue, also moves parent issue to "In Progress" if pending
+    /// - If story, also moves its epic to "In Progress" if pending
     /// - If the issue has no assignees, adds the workspace creator as an assignee
     pub async fn sync_issue_from_workspace_created(
         pool: &PgPool,
@@ -651,7 +781,7 @@ impl IssueRepository {
             };
 
             let Some(in_progress_status) =
-                ProjectStatusRepository::find_by_name(pool, issue.project_id, "In progress")
+                ProjectStatusRepository::find_by_name(pool, issue.project_id, "In Progress")
                     .await?
             else {
                 return Ok(());
@@ -667,7 +797,7 @@ impl IssueRepository {
             )
             .await?;
 
-            // If sub-issue, also move parent issue to "In progress"
+            // If sub-issue, also move parent issue to "In Progress"
             if let Some(parent_issue_id) = issue.parent_issue_id
                 && let Some(parent_issue) = Self::find_by_id(pool, parent_issue_id).await?
             {
@@ -675,6 +805,19 @@ impl IssueRepository {
                     &mut conn,
                     parent_issue_id,
                     parent_issue.status_id,
+                    in_progress_status.id,
+                )
+                .await?;
+            }
+
+            // If story, also move its epic to "In Progress"
+            if let Some(epic_id) = epic_id_from_metadata(&issue.extension_metadata)
+                && let Some(epic) = Self::find_by_id(pool, epic_id).await?
+            {
+                Self::move_to_status_if_pending(
+                    &mut conn,
+                    epic_id,
+                    epic.status_id,
                     in_progress_status.id,
                 )
                 .await?;

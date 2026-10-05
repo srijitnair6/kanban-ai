@@ -99,6 +99,8 @@ interface KanbanFilterBarProps<
   onHideBlockedChange: (hide: boolean) => void;
   onClearFilters: () => void;
   onCreateIssue: () => void;
+  /** Label for the create button, e.g. 'New epic'. Defaults to 'New issue'. */
+  createLabel?: string;
   shouldAnimateCreateButton: boolean;
   isMobile?: boolean;
   renderFiltersDialog?: (
@@ -135,6 +137,7 @@ export function KanbanFilterBar<
   onHideBlockedChange,
   onClearFilters,
   onCreateIssue,
+  createLabel,
   shouldAnimateCreateButton,
   isMobile,
   renderFiltersDialog,
@@ -249,14 +252,14 @@ export function KanbanFilterBar<
                 'rounded-sm p-half bg-brand hover:bg-brand-hover text-on-brand transition-colors',
                 shouldAnimateCreateButton && 'create-issue-attention'
               )}
-              aria-label={t('kanban.newIssue', 'New issue')}
+              aria-label={createLabel ?? t('kanban.newIssue', 'New issue')}
             >
               <PlusIcon className="size-icon-sm" weight="bold" />
             </button>
           ) : (
             <PrimaryButton
               variant="secondary"
-              value={t('kanban.newIssue', 'New issue')}
+              value={createLabel ?? t('kanban.newIssue', 'New issue')}
               actionIcon={PlusIcon}
               onClick={() => onCreateIssue()}
               className={cn(

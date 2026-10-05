@@ -3,6 +3,7 @@ import {
   KANBAN_ASSIGNEE_FILTER_VALUES,
   type KanbanFilterState,
 } from '@/shared/stores/useUiPreferencesStore';
+import { matchesEntityView, type EntityView } from '@/shared/lib/issueKind';
 import type {
   Issue,
   IssueAssignee,
@@ -21,6 +22,7 @@ type UseKanbanFiltersParams = {
   filters: KanbanFilterState;
   showSubIssues: boolean;
   hideBlocked: boolean;
+  entityView: EntityView;
   currentUserId: string | null;
 };
 
@@ -45,6 +47,7 @@ export function useKanbanFilters({
   filters,
   showSubIssues,
   hideBlocked,
+  entityView,
   currentUserId,
 }: UseKanbanFiltersParams): UseKanbanFiltersResult {
   // Create lookup maps for efficient filtering
@@ -72,7 +75,8 @@ export function useKanbanFilters({
 
   // Filter issues
   const filteredIssues = useMemo(() => {
-    let result = issues;
+    // Epic view shows only epics; story view shows stories (and plain issues)
+    let result = issues.filter((issue) => matchesEntityView(issue, entityView));
 
     // Filter sub-issues based on per-project preference
     if (!showSubIssues) {
@@ -170,6 +174,7 @@ export function useKanbanFilters({
     tagsByIssue,
     showSubIssues,
     hideBlocked,
+    entityView,
     issueRelationships,
     issuesById,
     doneStatusIds,

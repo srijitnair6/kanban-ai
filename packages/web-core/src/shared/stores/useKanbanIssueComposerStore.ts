@@ -1,12 +1,17 @@
 import { useCallback } from 'react';
 import { create } from 'zustand';
 import type { IssuePriority } from 'shared/remote-types';
+import type { IssueKind } from '@/shared/lib/issueKind';
 
 export interface ProjectIssueCreateOptions {
   statusId?: string;
   priority?: IssuePriority;
   assigneeIds?: string[];
   parentIssueId?: string;
+  /** Create an epic or a story instead of a plain issue. */
+  issueKind?: IssueKind;
+  /** For stories: the epic the new story belongs to. */
+  epicId?: string;
 }
 
 export interface KanbanIssueComposerDraft {
@@ -18,6 +23,8 @@ export interface KanbanIssueComposerDraft {
   tagIds?: string[];
   createDraftWorkspace?: boolean;
   parentIssueId?: string;
+  issueKind?: IssueKind;
+  epicId?: string;
 }
 
 export interface KanbanIssueComposerEntry {
@@ -57,6 +64,8 @@ function normalizeComposerDraft(
       ? { createDraftWorkspace: draft.createDraftWorkspace }
       : {}),
     ...(draft.parentIssueId ? { parentIssueId: draft.parentIssueId } : {}),
+    ...(draft.issueKind ? { issueKind: draft.issueKind } : {}),
+    ...(draft.epicId ? { epicId: draft.epicId } : {}),
   };
 }
 
@@ -76,6 +85,8 @@ function toInitialComposerDraft(
     priority: options?.priority,
     assigneeIds: options?.assigneeIds,
     parentIssueId: options?.parentIssueId,
+    issueKind: options?.issueKind,
+    epicId: options?.epicId,
     tagIds: [],
     createDraftWorkspace: false,
   });

@@ -16,8 +16,10 @@ struct McpCreateIssueRelationshipRequest {
     issue_id: Uuid,
     #[schemars(description = "The related issue ID")]
     related_issue_id: Uuid,
-    #[schemars(description = "Relationship type: 'blocking', 'related', or 'has_duplicate'")]
-    relationship_type: IssueRelationshipType,
+    #[schemars(
+        description = "Relationship type: 'depends_on' (issue_id depends on related_issue_id, so related_issue_id must be finished first), 'blocking' (issue_id blocks related_issue_id), 'related', or 'has_duplicate'"
+    )]
+    relationship_type: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -42,7 +44,7 @@ struct McpDeleteIssueRelationshipResponse {
 #[tool_router(router = issue_relationships_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Create a relationship between two issues. Types: 'blocking', 'related', 'has_duplicate'."
+        description = "Create a relationship between two issues. Types: 'depends_on' (issue_id depends on related_issue_id; use this for 'ticket 2 depends on ticket 1'), 'blocking', 'related', 'has_duplicate'."
     )]
     async fn create_issue_relationship(
         &self,
@@ -52,6 +54,30 @@ impl McpServer {
             relationship_type,
         }): Parameters<McpCreateIssueRelationshipRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        // `depends_on` is stored as `blocking` in the opposite direction.
+        let (issue_id, related_issue_id, relationship_type) = match relationship_type
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "depends_on" | "depends-on" => {
+                (related_issue_id, issue_id, IssueRelationshipType::Blocking)
+            }
+            "blocking" => (issue_id, related_issue_id, IssueRelationshipType::Blocking),
+            "related" => (issue_id, related_issue_id, IssueRelationshipType::Related),
+            "has_duplicate" => (
+                issue_id,
+                related_issue_id,
+                IssueRelationshipType::HasDuplicate,
+            ),
+            other => {
+                return Ok(Self::tool_error(super::ToolError::message(format!(
+                    "Unknown relationship_type '{}'. Allowed values: ['depends_on', 'blocking', 'related', 'has_duplicate']",
+                    other
+                ))));
+            }
+        };
+
         let payload = CreateIssueRelationshipRequest {
             id: None,
             issue_id,

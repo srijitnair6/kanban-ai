@@ -1457,7 +1457,7 @@ export const Actions = {
 
   MarkBlocking: {
     id: 'mark-blocking',
-    label: 'Mark Blocking',
+    label: 'Mark Required By',
     icon: ArrowBendUpRightIcon,
     requiresTarget: ActionTargetType.ISSUE,
     isVisible: (ctx) =>
@@ -1476,7 +1476,7 @@ export const Actions = {
 
   MarkBlockedBy: {
     id: 'mark-blocked-by',
-    label: 'Mark Blocked By',
+    label: 'Mark Depends On',
     icon: ProhibitIcon,
     requiresTarget: ActionTargetType.ISSUE,
     isVisible: (ctx) =>

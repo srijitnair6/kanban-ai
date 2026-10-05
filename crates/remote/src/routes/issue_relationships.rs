@@ -17,7 +17,7 @@ use super::{
 use crate::{
     AppState,
     auth::RequestContext,
-    db::issue_relationships::IssueRelationshipRepository,
+    db::{issue_relationships::IssueRelationshipRepository, issues::IssueRepository},
     mutation_definition::{MutationBuilder, NoUpdate},
 };
 
@@ -46,9 +46,19 @@ async fn list_issue_relationships(
 ) -> Result<Json<ListIssueRelationshipsResponse>, ErrorResponse> {
     ensure_issue_access(state.pool(), ctx.user.id, query.issue_id).await?;
 
-    let issue_relationships = IssueRelationshipRepository::list_by_issue(
+    let issue = IssueRepository::find_by_id(state.pool(), query.issue_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, issue_id = %query.issue_id, "failed to load issue");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to load issue")
+        })?
+        .ok_or_else(|| ErrorResponse::new(StatusCode::NOT_FOUND, "issue not found"))?;
+
+    // Relationships are stored once, on the source issue. Return both the ones this issue
+    // starts and the ones that point at it, so "depends on" shows on the dependent ticket too.
+    let issue_relationships = IssueRelationshipRepository::list_by_project(
         state.pool(),
-        query.issue_id,
+        issue.project_id,
     )
     .await
     .map_err(|error| {
@@ -57,7 +67,10 @@ async fn list_issue_relationships(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to list issue relationships",
         )
-    })?;
+    })?
+    .into_iter()
+    .filter(|r| r.issue_id == query.issue_id || r.related_issue_id == query.issue_id)
+    .collect();
 
     Ok(Json(ListIssueRelationshipsResponse {
         issue_relationships,

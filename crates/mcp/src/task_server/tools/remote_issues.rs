@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use api_types::{
-    CreateIssueRequest, Issue, IssuePriority, IssueRelationshipType, IssueSortField,
+    CreateIssueRequest, Issue, IssueKind, IssuePriority, IssueRelationshipType, IssueSortField,
     ListIssueRelationshipsResponse, ListIssueTagsResponse, ListIssuesResponse,
     ListPullRequestsResponse, ListTagsResponse, MutationResponse, PullRequestStatus,
-    SearchIssuesRequest, SortDirection, UpdateIssueRequest,
+    SearchIssuesRequest, SortDirection, UpdateIssueRequest, build_metadata, epic_id_from_metadata,
 };
 use rmcp::{
     ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool,
@@ -31,6 +31,16 @@ struct McpCreateIssueRequest {
     priority: Option<String>,
     #[schemars(description = "Optional parent issue ID to create a subissue")]
     parent_issue_id: Option<Uuid>,
+    #[schemars(
+        description = "Optional issue type: 'epic' or 'story'. Stories are independent board cards that belong to an epic and require `epic_id`. Omit for a plain issue."
+    )]
+    issue_type: Option<String>,
+    #[schemars(description = "For stories only: the ID of the epic the story belongs to")]
+    epic_id: Option<Uuid>,
+    #[schemars(
+        description = "Optional initial status name, e.g. 'Backlog' or 'To Do'. Defaults to the project's first visible status."
+    )]
+    status: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -56,6 +66,10 @@ struct McpListIssuesRequest {
     priority: Option<String>,
     #[schemars(description = "Filter by parent issue ID (subissues of this issue)")]
     parent_issue_id: Option<Uuid>,
+    #[schemars(description = "Filter by issue type: 'epic' or 'story'")]
+    issue_type: Option<String>,
+    #[schemars(description = "Filter to the stories of this epic ID")]
+    epic_id: Option<Uuid>,
     #[schemars(description = "Case-insensitive substring match against title and description")]
     search: Option<String>,
     #[schemars(description = "Filter by issue simple ID (case-insensitive exact match)")]
@@ -88,6 +102,10 @@ struct IssueSummary {
     priority: Option<String>,
     #[schemars(description = "Parent issue ID if this is a subissue")]
     parent_issue_id: Option<String>,
+    #[schemars(description = "Issue type: 'epic', 'story', or absent for a plain issue")]
+    issue_type: Option<String>,
+    #[schemars(description = "For stories: the ID of the epic this story belongs to")]
+    epic_id: Option<String>,
     #[schemars(description = "When the issue was created")]
     created_at: String,
     #[schemars(description = "When the issue was last updated")]
@@ -136,6 +154,10 @@ struct McpRelationshipSummary {
     related_simple_id: String,
     #[schemars(description = "Relationship type: blocking, related, or has_duplicate")]
     relationship_type: String,
+    #[schemars(
+        description = "What the related issue is to THIS issue: 'depends_on' (this issue cannot finish before the related one), 'required_by' (the related issue depends on this one), 'related', 'duplicate_of' or 'has_duplicate'"
+    )]
+    meaning: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -168,6 +190,10 @@ struct IssueDetails {
     priority: Option<String>,
     #[schemars(description = "Parent issue ID if this is a subissue")]
     parent_issue_id: Option<String>,
+    #[schemars(description = "Issue type: 'epic', 'story', or absent for a plain issue")]
+    issue_type: Option<String>,
+    #[schemars(description = "For stories: the ID of the epic this story belongs to")]
+    epic_id: Option<String>,
     #[schemars(description = "Optional planned start date")]
     start_date: Option<String>,
     #[schemars(description = "Optional planned target date")]
@@ -216,6 +242,8 @@ struct McpUpdateIssueRequest {
         description = "Parent issue ID to set this as a subissue. Pass null to un-nest from parent."
     )]
     parent_issue_id: Option<Option<Uuid>>,
+    #[schemars(description = "For stories only: move the story to a different epic by epic ID")]
+    epic_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -263,10 +291,18 @@ impl McpServer {
             description,
             priority,
             parent_issue_id,
+            issue_type,
+            epic_id,
+            status,
         }): Parameters<McpCreateIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let project_id = match self.resolve_project_id(project_id) {
             Ok(id) => id,
+            Err(e) => return Ok(McpServer::tool_error(e)),
+        };
+
+        let extension_metadata = match Self::build_issue_metadata(issue_type.as_deref(), epic_id) {
+            Ok(metadata) => metadata,
             Err(e) => return Ok(McpServer::tool_error(e)),
         };
 
@@ -275,9 +311,15 @@ impl McpServer {
             None => None,
         };
 
-        let status_id = match self.default_status_id(project_id).await {
-            Ok(id) => id,
-            Err(e) => return Ok(McpServer::tool_error(e)),
+        let status_id = match status.as_deref() {
+            Some(status_name) => match self.resolve_status_id(project_id, status_name).await {
+                Ok(id) => id,
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            },
+            None => match self.default_status_id(project_id).await {
+                Ok(id) => id,
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            },
         };
 
         let priority = match priority {
@@ -301,7 +343,7 @@ impl McpServer {
             sort_order: 0.0,
             parent_issue_id,
             parent_issue_sort_order: None,
-            extension_metadata: serde_json::json!({}),
+            extension_metadata,
         };
 
         let url = self.url("/api/remote/issues");
@@ -328,6 +370,8 @@ impl McpServer {
             status,
             priority,
             parent_issue_id,
+            issue_type,
+            epic_id,
             search,
             simple_id,
             assignee_user_id,
@@ -341,6 +385,24 @@ impl McpServer {
             Ok(id) => id,
             Err(e) => return Ok(McpServer::tool_error(e)),
         };
+
+        let kind_filter = match issue_type.as_deref() {
+            Some(raw) => match IssueKind::parse(raw) {
+                Some(kind) => Some(kind),
+                None => {
+                    return Ok(McpServer::tool_error(ToolError::message(format!(
+                        "Unknown issue_type '{}'. Allowed values: ['epic', 'story']",
+                        raw
+                    ))));
+                }
+            },
+            None => None,
+        };
+        // Epic/story info lives in extension_metadata, which the server cannot filter on,
+        // so those filters are applied here after fetching the whole project.
+        let filters_by_metadata = kind_filter.is_some() || epic_id.is_some();
+        let requested_limit = limit.unwrap_or(50).max(0) as usize;
+        let requested_offset = offset.unwrap_or(0).max(0) as usize;
 
         let project_statuses = match self.fetch_project_statuses(project_id).await {
             Ok(statuses) => Some(statuses),
@@ -432,14 +494,49 @@ impl McpServer {
                 tag_ids,
                 sort_field,
                 sort_direction,
-                limit: Some(limit.unwrap_or(50).max(0)),
-                offset: Some(offset.unwrap_or(0).max(0)),
+                limit: Some(if filters_by_metadata {
+                    1000
+                } else {
+                    limit.unwrap_or(50).max(0)
+                }),
+                offset: Some(if filters_by_metadata {
+                    0
+                } else {
+                    offset.unwrap_or(0).max(0)
+                }),
             };
             let url = self.url("/api/remote/issues/search");
             match self.send_json(self.client.post(&url).json(&query)).await {
                 Ok(r) => r,
                 Err(e) => return Ok(McpServer::tool_error(e)),
             }
+        };
+
+        let response = if filters_by_metadata {
+            let matching: Vec<Issue> = response
+                .issues
+                .into_iter()
+                .filter(|issue| {
+                    kind_filter.is_none_or(|kind| {
+                        IssueKind::from_metadata(&issue.extension_metadata) == Some(kind)
+                    }) && epic_id.is_none_or(|id| {
+                        epic_id_from_metadata(&issue.extension_metadata) == Some(id)
+                    })
+                })
+                .collect();
+            let total_count = matching.len();
+            ListIssuesResponse {
+                issues: matching
+                    .into_iter()
+                    .skip(requested_offset)
+                    .take(requested_limit)
+                    .collect(),
+                total_count,
+                limit: requested_limit,
+                offset: requested_offset,
+            }
+        } else {
+            response
         };
 
         let mut summaries = Vec::with_capacity(response.issues.len());
@@ -492,6 +589,7 @@ impl McpServer {
             status,
             priority,
             parent_issue_id,
+            epic_id,
         }): Parameters<McpUpdateIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         // First get the issue to know its project_id for status resolution
@@ -529,6 +627,20 @@ impl McpServer {
             None
         };
 
+        let extension_metadata = match epic_id {
+            Some(new_epic_id) => {
+                if IssueKind::from_metadata(&existing_issue.extension_metadata)
+                    != Some(IssueKind::Story)
+                {
+                    return Ok(McpServer::tool_error(ToolError::message(
+                        "epic_id can only be set on a story",
+                    )));
+                }
+                Some(build_metadata(IssueKind::Story, Some(new_epic_id)))
+            }
+            None => None,
+        };
+
         let payload = UpdateIssueRequest {
             status_id,
             title,
@@ -540,7 +652,7 @@ impl McpServer {
             sort_order: None,
             parent_issue_id,
             parent_issue_sort_order: None,
-            extension_metadata: None,
+            extension_metadata,
         };
 
         let url = self.url(&format!("/api/remote/issues/{}", issue_id));
@@ -637,6 +749,9 @@ impl McpServer {
                 .map(Self::issue_priority_label)
                 .map(str::to_string),
             parent_issue_id: issue.parent_issue_id.map(|id| id.to_string()),
+            issue_type: IssueKind::from_metadata(&issue.extension_metadata)
+                .map(|kind| kind.as_str().to_string()),
+            epic_id: epic_id_from_metadata(&issue.extension_metadata).map(|id| id.to_string()),
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
             pull_request_count: pull_requests.pull_requests.len(),
@@ -676,6 +791,9 @@ impl McpServer {
                 .map(Self::issue_priority_label)
                 .map(str::to_string),
             parent_issue_id: issue.parent_issue_id.map(|id| id.to_string()),
+            issue_type: IssueKind::from_metadata(&issue.extension_metadata)
+                .map(|kind| kind.as_str().to_string()),
+            epic_id: epic_id_from_metadata(&issue.extension_metadata).map(|id| id.to_string()),
             start_date: issue.start_date.map(|date| date.to_rfc3339()),
             target_date: issue.target_date.map(|date| date.to_rfc3339()),
             completed_at: issue.completed_at.map(|date| date.to_rfc3339()),
@@ -785,19 +903,35 @@ impl McpServer {
             .issue_relationships
             .into_iter()
             .map(|r| {
+                let is_source = r.issue_id == issue_id;
+                let other_issue_id = if is_source {
+                    r.related_issue_id
+                } else {
+                    r.issue_id
+                };
                 let related_simple_id = simple_id_map
-                    .get(&r.related_issue_id)
+                    .get(&other_issue_id)
                     .unwrap_or(&"")
                     .to_string();
+                // `blocking` is stored as "source blocks related", so the related issue
+                // depends on the source.
+                let meaning = match (r.relationship_type, is_source) {
+                    (IssueRelationshipType::Blocking, true) => "required_by",
+                    (IssueRelationshipType::Blocking, false) => "depends_on",
+                    (IssueRelationshipType::Related, _) => "related",
+                    (IssueRelationshipType::HasDuplicate, true) => "duplicate_of",
+                    (IssueRelationshipType::HasDuplicate, false) => "has_duplicate",
+                };
                 McpRelationshipSummary {
                     id: r.id.to_string(),
-                    related_issue_id: r.related_issue_id.to_string(),
+                    related_issue_id: other_issue_id.to_string(),
                     related_simple_id,
                     relationship_type: match r.relationship_type {
                         IssueRelationshipType::Blocking => "blocking".to_string(),
                         IssueRelationshipType::Related => "related".to_string(),
                         IssueRelationshipType::HasDuplicate => "has_duplicate".to_string(),
                     },
+                    meaning: meaning.to_string(),
                 }
             })
             .collect()
@@ -844,6 +978,37 @@ impl McpServer {
                 }
             })
             .collect()
+    }
+
+    /// Builds `extension_metadata` for a new issue from the optional epic/story arguments.
+    fn build_issue_metadata(
+        issue_type: Option<&str>,
+        epic_id: Option<Uuid>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let Some(raw) = issue_type else {
+            if epic_id.is_some() {
+                return Err(ToolError::message("epic_id requires issue_type 'story'"));
+            }
+            return Ok(serde_json::json!({}));
+        };
+        match IssueKind::parse(raw) {
+            Some(IssueKind::Epic) => {
+                if epic_id.is_some() {
+                    return Err(ToolError::message("An epic cannot have an epic_id"));
+                }
+                Ok(build_metadata(IssueKind::Epic, None))
+            }
+            Some(IssueKind::Story) => match epic_id {
+                Some(epic_id) => Ok(build_metadata(IssueKind::Story, Some(epic_id))),
+                None => Err(ToolError::message(
+                    "A story requires epic_id (the ID of its epic)",
+                )),
+            },
+            None => Err(ToolError::message(format!(
+                "Unknown issue_type '{}'. Allowed values: ['epic', 'story']",
+                raw
+            ))),
+        }
     }
 
     fn parse_issue_priority(priority: &str) -> Result<IssuePriority, ToolError> {
