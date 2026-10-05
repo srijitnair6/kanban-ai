@@ -297,6 +297,17 @@ async fn create_issue(
         db_error(error, "failed to create issue")
     })?;
 
+    // A new story under a finished epic reopens it; best effort, the story itself is saved.
+    match state.pool().acquire().await {
+        Ok(mut conn) => {
+            if let Err(error) = IssueRepository::rollup_epic_status(&mut conn, &response.data).await
+            {
+                tracing::warn!(?error, issue_id = %response.data.id, "failed to roll up epic status");
+            }
+        }
+        Err(error) => tracing::warn!(?error, "failed to acquire connection for epic roll-up"),
+    }
+
     // Auto-follow: the creator should receive notifications for all activity on this issue.
     if let Err(e) =
         IssueFollowerRepository::create(state.pool(), None, response.data.id, ctx.user.id).await
@@ -392,6 +403,12 @@ async fn update_issue(
                 tracing::error!(?error, "failed to cascade epic status to stories");
                 ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
             })?;
+        IssueRepository::rollup_epic_status(&mut tx, &data)
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, "failed to roll up epic status");
+                ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            })?;
     }
 
     let txid = get_txid(&mut *tx).await.map_err(|error| {
@@ -455,6 +472,18 @@ async fn delete_issue(
             tracing::error!(?error, "failed to delete issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         })?;
+
+    // Deleting the last unfinished story can complete its epic; best effort.
+    if let Some(epic_id) = api_types::epic_id_from_metadata(&issue.extension_metadata) {
+        match state.pool().acquire().await {
+            Ok(mut conn) => {
+                if let Err(error) = IssueRepository::rollup_epic_by_id(&mut conn, epic_id).await {
+                    tracing::warn!(?error, %epic_id, "failed to roll up epic status after delete");
+                }
+            }
+            Err(error) => tracing::warn!(?error, "failed to acquire connection for epic roll-up"),
+        }
+    }
 
     send_issue_notifications(
         state.pool(),
@@ -576,6 +605,12 @@ async fn bulk_update_issues(
         })?;
 
         if status_changed {
+            IssueRepository::rollup_epic_status(&mut tx, &updated)
+                .await
+                .map_err(|error| {
+                    tracing::error!(?error, issue_id = %item.id, "failed to roll up epic status");
+                    ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to update issue")
+                })?;
             IssueRepository::cascade_epic_status(&mut tx, &updated)
                 .await
                 .map_err(|error| {
