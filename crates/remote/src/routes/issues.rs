@@ -362,6 +362,8 @@ async fn update_issue(
         ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     })?;
 
+    let status_changed = payload.status_id.is_some_and(|id| id != issue.status_id);
+
     let data = IssueRepository::update(
         &mut *tx,
         issue_id,
@@ -382,6 +384,15 @@ async fn update_issue(
         tracing::error!(?error, "failed to update issue");
         ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     })?;
+
+    if status_changed {
+        IssueRepository::cascade_epic_status(&mut tx, &data)
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, "failed to cascade epic status to stories");
+                ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            })?;
+    }
 
     let txid = get_txid(&mut *tx).await.map_err(|error| {
         tracing::error!(?error, "failed to get txid");
@@ -537,6 +548,11 @@ async fn bulk_update_issues(
             ));
         }
 
+        let status_changed = item
+            .changes
+            .status_id
+            .is_some_and(|id| id != issue.status_id);
+
         // Update the issue
         let updated = IssueRepository::update(
             &mut *tx,
@@ -558,6 +574,15 @@ async fn bulk_update_issues(
             tracing::error!(?error, issue_id = %item.id, "failed to update issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to update issue")
         })?;
+
+        if status_changed {
+            IssueRepository::cascade_epic_status(&mut tx, &updated)
+                .await
+                .map_err(|error| {
+                    tracing::error!(?error, issue_id = %item.id, "failed to cascade epic status to stories");
+                    ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to update issue")
+                })?;
+        }
 
         notification_pairs.push((issue, updated.clone()));
         results.push(updated);
